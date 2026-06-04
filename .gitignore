@@ -1,0 +1,44 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE and local configs
+.idea/
+.vscode/
+
+# Model weights and checkpoints
+weights/
+checkpoints/
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+
+# Local packages and datasets
+offline_libs/
+datasets/
+data/imagenet/
+ImageNet/
+
+# Outputs
+outputs/
+runs/
+logs/
+results/
+*.log
+
+# Generated experiment artifacts
+metrics_*.csv
+threshold_sweep_*.csv
+pareto_frontier*.pdf
+sensitivity_line_chart_*.pdf
+scatter_decision_*.png
+tsne_comparison.pdf
+alpha_distribution.pdf
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.rar
