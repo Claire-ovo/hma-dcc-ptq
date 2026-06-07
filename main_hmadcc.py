@@ -199,6 +199,8 @@ def extract_hybrid_metrics(
     batch_size: int,
     threshold: float,
     protect_head: bool,
+    hessian_samples: int,
+    act_quant: bool,
 ):
     device = next(fp_model.parameters()).device
     metric_dict = {}
@@ -226,7 +228,7 @@ def extract_hybrid_metrics(
             used_conv_params[name] = param
             used_grads.append(grad)
 
-    max_iter = 20
+    max_iter = hessian_samples
     trace_dict = {name: 0.0 for name in used_conv_params.keys()}
     for _ in range(max_iter):
         vectors = [
@@ -265,7 +267,7 @@ def extract_hybrid_metrics(
                 with torch.no_grad():
                     fp_out = fp_module(cur_inp)
 
-                set_quant_state_robust(module, True, True)
+                set_quant_state_robust(module, True, act_quant)
                 with torch.no_grad():
                     _ = module(cur_inp)
 
@@ -333,18 +335,18 @@ def reconstruct_model(
             cur_kwargs = dict(
                 cali_data=cali_data,
                 batch_size=args.batch_size,
-                weight=0.01,
-                lr=4e-5,
-                b_range=(20, 2),
-                warmup=0.2,
-                opt_mode="mse",
-                input_prob=0.5,
+                weight=args.recon_weight,
+                lr=args.recon_lr,
+                b_range=(args.b_start, args.b_end),
+                warmup=args.warmup,
+                opt_mode=args.opt_mode,
+                input_prob=args.input_prob,
                 keep_gpu=True,
-                asym=True,
-                act_quant=True,
+                asym=args.asym,
+                act_quant=args.act_quant,
                 use_infonce=False,
                 infonce_lambda=0.0,
-                infonce_tau=0.1,
+                infonce_tau=args.infonce_tau,
             )
 
             is_sensitive = routing_table.get(full_name, True)
@@ -406,8 +408,23 @@ def parse_args():
     parser.add_argument("--iters-sensitive", default=20000, type=int)
     parser.add_argument("--iters-robust", default=5000, type=int)
     parser.add_argument("--infonce-lambda", default=0.1, type=float)
+    parser.add_argument("--infonce-tau", default=0.1, type=float)
+    parser.add_argument("--hessian-samples", default=20, type=int)
+    parser.add_argument("--recon-weight", default=0.01, type=float)
+    parser.add_argument("--recon-lr", default=4e-5, type=float)
+    parser.add_argument("--b-start", default=20, type=float)
+    parser.add_argument("--b-end", default=2, type=float)
+    parser.add_argument("--warmup", default=0.2, type=float)
+    parser.add_argument("--opt-mode", default="mse", type=str)
+    parser.add_argument("--input-prob", default=0.5, type=float)
     parser.add_argument("--workers", default=4, type=int)
     parser.add_argument("--device", default="cuda", help="CUDA device used for calibration, e.g. cuda or cuda:0.")
+    quant_group = parser.add_mutually_exclusive_group()
+    quant_group.add_argument("--asym", dest="asym", action="store_true", default=True)
+    quant_group.add_argument("--symmetric", dest="asym", action="store_false")
+    act_group = parser.add_mutually_exclusive_group()
+    act_group.add_argument("--act-quant", dest="act_quant", action="store_true", default=True)
+    act_group.add_argument("--disable-act-quant", dest="act_quant", action="store_false")
     parser.add_argument(
         "--protect-head",
         action="store_true",
@@ -418,6 +435,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.hessian_samples <= 0:
+        raise ValueError("--hessian-samples must be positive.")
     seed_all(args.seed)
 
     device = torch.device(args.device)
@@ -433,6 +452,7 @@ def main():
     print(f"Quantization: W{args.n_bits_w}A{args.n_bits_a}")
     print(f"Calibration samples: {args.num_calibration_samples}")
     print(f"HMA hard-routing threshold: {args.hma_threshold}")
+    print(f"Hessian estimation samples: {args.hessian_samples}")
     print(f"Head protection: {'enabled' if args.protect_head else 'disabled'}")
 
     train_loader, test_loader = build_imagenet_data(
@@ -449,7 +469,13 @@ def main():
     fp_model_base = fp_model_base.to(device).eval()
 
     wq_params = {"n_bits": args.n_bits_w, "channel_wise": True, "scale_method": "mse"}
-    aq_params = {"n_bits": args.n_bits_a, "channel_wise": False, "scale_method": "mse", "leaf_param": True, "prob": 0.5}
+    aq_params = {
+        "n_bits": args.n_bits_a,
+        "channel_wise": False,
+        "scale_method": "mse",
+        "leaf_param": True,
+        "prob": args.input_prob,
+    }
 
     fp_model = QuantModel(model=fp_model_base, weight_quant_params=wq_params, act_quant_params=aq_params, is_fusing=False)
     fp_model.set_quant_state(False, False)
@@ -473,6 +499,8 @@ def main():
         batch_size=args.batch_size,
         threshold=args.hma_threshold,
         protect_head=args.protect_head,
+        hessian_samples=args.hessian_samples,
+        act_quant=args.act_quant,
     )
 
     builtins.GLOBAL_CALIBRATION_FLOPS = 0.0
@@ -487,7 +515,7 @@ def main():
     total_flops = getattr(builtins, "GLOBAL_CALIBRATION_FLOPS", 0.0)
 
     print("\n[Step 2] Evaluating the quantized model")
-    qnn.set_quant_state(weight_quant=True, act_quant=True)
+    qnn.set_quant_state(weight_quant=True, act_quant=args.act_quant)
     final_acc = validate_model(test_loader, qnn, device)
 
     acc_drop = fp32_acc - final_acc
@@ -501,6 +529,16 @@ def main():
         "iters_sensitive": args.iters_sensitive,
         "iters_robust": args.iters_robust,
         "infonce_lambda": args.infonce_lambda,
+        "infonce_tau": args.infonce_tau,
+        "hessian_samples": args.hessian_samples,
+        "recon_weight": args.recon_weight,
+        "recon_lr": args.recon_lr,
+        "b_range": [args.b_start, args.b_end],
+        "warmup": args.warmup,
+        "opt_mode": args.opt_mode,
+        "input_prob": args.input_prob,
+        "asymmetric_quantization": args.asym,
+        "activation_quantization": args.act_quant,
         "protect_head": args.protect_head,
         "fp32_top1": fp32_acc,
         "quantized_top1": final_acc,

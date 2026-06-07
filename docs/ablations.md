@@ -1,15 +1,16 @@
 # Ablation Notes
 
-This document records the current ablation-code audit for the anonymous release. Historical ablation entry scripts are not copied into this repository because they contain local paths, non-anonymous logs, `eval()`-based model construction, generated artifact logic, or exploratory variants that are not safe as public entries.
+This anonymous release does not directly include historical high-risk ablation scripts. The original ablation scripts came from an internal experimental workspace and contain local paths, old log parsing, generated artifact code, and exploratory branches. They are therefore not copied verbatim into this public repository.
 
-## Reproducible Options in the Public Entry
+## Clean Ablations Supported by `main_hmadcc.py`
 
-The official entry keeps the main HMA-DCC configuration unchanged. The following controlled variants can be reproduced through `main_hmadcc.py` without changing the main defaults:
+The public entry keeps the main HMA-DCC configuration unchanged. The following controlled variants can be reproduced through CLI flags:
 
-- Protected-head variant: add `--protect-head`.
-- Threshold study: change `--hma-threshold` explicitly.
-- Calibration budget study: change `--iters-sensitive` or `--iters-robust` explicitly.
-- InfoNCE strength study: change `--infonce-lambda` explicitly.
+- Head protection on or off: use `--protect-head` to enable it. It is off by default.
+- Threshold sensitivity: change `--hma-threshold`.
+- Robust and sensitive iteration allocation: change `--iters-sensitive` and `--iters-robust`.
+- InfoNCE strength: change `--infonce-lambda`.
+- No-InfoNCE ablation: set `--infonce-lambda 0`.
 
 The example scripts support optional arguments through `EXTRA_ARGS`. For example:
 
@@ -17,23 +18,31 @@ The example scripts support optional arguments through `EXTRA_ARGS`. For example
 EXTRA_ARGS="--protect-head" bash scripts/run_resnet18_w2a2.sh
 ```
 
-## Historical Ablation Dimensions
+## Historical Source Mapping
 
-The original experimental workspace included scripts for the following dimensions:
+The internal source scan found these ablation-related files:
 
-- Metric source: hybrid, Hessian-only, or perturbation-only routing scores.
-- Routing threshold sweeps.
-- InfoNCE branch variants, including disabled or fixed-weight InfoNCE.
-- Protected-head variants.
-- Fisher-guided, entropy-guided, and fast local InfoNCE exploratory variants.
+- `main_ablation.py`: threshold sweep and metric-source ablations. In sweep mode it wrote `threshold_sweep_<arch>.csv` and `threshold_sweep_plot_<arch>.pdf`.
+- `main_ablation_ptq.py`: metric-source, allocation, InfoNCE, and head-protection ablations, including a continuous InfoNCE option that is not part of the public default method.
+- `main_plan_e_ablations.py`: anchor and two-stage exploratory ablations.
+- `sensitivity_analyzer.py`: metric CSV and sensitivity line chart generation.
+- `plot_scatter.py`, `plot_pareto.py`, `plot_rescue.py`, and `analyze_tsne_alpha.py`: historical figure-generation scripts.
 
-Only the first four dimensions are directly related to the HMA-DCC ablation space. The Fisher-guided, entropy-guided, and fast local InfoNCE scripts are treated as exploratory code and are not included in this anonymous release.
+These files are recorded as provenance only. They are not copied into the anonymous release because they are not clean public entries.
 
-## Current Release Decision
+## Paper Table and Figure Coverage
 
-No historical ablation script is copied verbatim. A cleaned ablation entry can be added later if needed, but it should reuse the official model registry, checkpoint loading, data-path arguments, and HMA-DCC calibration functions from `main_hmadcc.py`.
+The clean public ablation commands cover:
 
-The main method remains hard-routed HMA-DCC with:
+- Table V style allocation comparisons through `--iters-sensitive` and `--iters-robust`.
+- Table VI style InfoNCE and head-protection comparisons through `--infonce-lambda` and `--protect-head`.
+- Fig. 3 style threshold sensitivity through repeated runs with different `--hma-threshold` values.
+
+Historical figure-generation scripts were not included in the anonymous release. If internal archival requires exact paper figures, store the sanitized historical scripts, source CSV files, generated figures, and paper PDF in the separate internal archive described in `docs/internal_archive_guide.md`.
+
+## Default Routing Rule
+
+The main method remains hard-routed HMA-DCC:
 
 ```text
 is_sensitive = hybrid_score >= hma_threshold

@@ -10,3 +10,6 @@
 - No historical failed experiment entries in the top-level directory.
 - No local package archives.
 - No private deployment information.
+- `--protect-head` is optional and disabled by default.
+- HMA hard routing uses `hybrid_score >= hma_threshold`.
+- Historical figure and ablation scripts are documented but not copied.

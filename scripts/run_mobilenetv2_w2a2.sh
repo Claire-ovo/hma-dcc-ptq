@@ -27,6 +27,17 @@ python main_hmadcc.py \
   --iters-sensitive 20000 \
   --iters-robust 5000 \
   --infonce-lambda 0.1 \
+  --infonce-tau 0.1 \
+  --hessian-samples 20 \
+  --recon-weight 0.01 \
+  --recon-lr 4e-5 \
+  --b-start 20 \
+  --b-end 2 \
+  --warmup 0.2 \
+  --opt-mode mse \
+  --input-prob 0.5 \
+  --asym \
+  --act-quant \
   --workers 4 \
   --device cuda \
   ${EXTRA_ARGS}
