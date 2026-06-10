@@ -1,7 +1,5 @@
 # Threshold Sweep Commands
 
-The original internal `main_ablation.py` contained `--sweep_thresholds` and wrote `threshold_sweep_<arch>.csv` plus `threshold_sweep_plot_<arch>.pdf`. That script is not copied into the anonymous release. The clean public reproduction path is to run `main_hmadcc.py` once per threshold and archive the JSON summaries.
-
 Read these fields from each JSON: `hma_threshold`, `quantized_top1`, `calibration_flops`, `peak_memory_mb`, `wall_time_seconds`, and `seed`.
 
 ## ResNet-18 Threshold Sweep
