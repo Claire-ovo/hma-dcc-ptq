@@ -252,7 +252,7 @@ Hybrid Fusion
 Pure Hessian:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -265,7 +265,7 @@ CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
 Pure Perturbation:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -278,7 +278,7 @@ CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
 Hybrid Fusion:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -317,7 +317,7 @@ mnasnet
 ```bash
 for arch in resnet18 resnet50 mobilenetv2 mnasnet; do
   for metric in baseline hessian perturb hybrid; do
-    CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+    CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
       --data_path ${DATA_DIR} \
       --arch ${arch} \
       --n_bits_w 2 \
@@ -348,7 +348,7 @@ Dynamic Routing / HMA-DCC
 Fixed 20k:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -361,7 +361,7 @@ CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
 Fixed 10k:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -374,7 +374,7 @@ CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
 Dynamic Routing:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -403,7 +403,7 @@ Hard-threshold InfoNCE, head protection on
 No InfoNCE, head protection off:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -417,7 +417,7 @@ CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
 Hard-threshold InfoNCE, head protection off:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -431,7 +431,7 @@ CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
 Hard-threshold InfoNCE, head protection on:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -458,7 +458,7 @@ Thresholds:
 ### Sweep command
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_ablation.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -490,7 +490,7 @@ mobilenetv2
 ResNet-50:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet50 \
   --n_bits_w 2 \
@@ -502,7 +502,7 @@ CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
 RegNetX-3.2GF:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch regnetx_3200m \
   --n_bits_w 2 \
@@ -514,7 +514,7 @@ CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
 RegNetX-600MF:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch regnetx_600m \
   --n_bits_w 2 \
@@ -526,7 +526,7 @@ CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
 MNASNet:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch mnasnet \
   --n_bits_w 2 \
@@ -538,7 +538,7 @@ CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
 MobileNetV2:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch mobilenetv2 \
   --n_bits_w 2 \
@@ -569,7 +569,7 @@ Calibration sample sizes:
 1024 samples:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -581,7 +581,7 @@ CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
 512 samples:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -595,7 +595,7 @@ CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
 256 samples:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -608,7 +608,7 @@ CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
 128 samples:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python main_generalization.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
@@ -629,7 +629,7 @@ Fig. 4 visualizes feature representations from the FP32 model and the HMA-DCC W2
 ### Command
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python analyze_tsne_alpha.py \
+CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
   --data_path ${DATA_DIR} \
   --arch resnet18 \
   --n_bits_w 2 \
