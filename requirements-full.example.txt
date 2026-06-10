@@ -1,5 +1,0 @@
-# Generate the exact archival dependency list in the reproduction environment:
-# pip freeze > requirements-full.txt
-#
-# Python: to be filled according to the archival environment.
-# CUDA: to be filled according to the archival environment.
