@@ -12,7 +12,6 @@ This document follows the experiment reproducibility and code archival requireme
 2. Provide random seeds for all experiments involving randomness.
 3. Avoid hard-coded hyperparameters and expose them as command-line arguments.
 4. Provide the exact command or command template for each paper table or figure.
-5. Archive intermediate logs and final data used in each table or figure.
 
 ## 2. Common environment
 
@@ -27,7 +26,7 @@ Dataset: ImageNet-1K
 Calibration set size: 1,024 unlabeled ImageNet training images unless otherwise specified
 Evaluation set: ImageNet validation set
 Metric: Top-1 accuracy
-Resource metrics: calibration FLOPs, peak GPU memory, wall-clock calibration time
+Resource metrics: Total FLOPs, peak GPU memory, wall-clock calibration time
 ```
 
 ## 3. Common variables
@@ -169,7 +168,7 @@ done
 
 ### Target result
 
-Table II reports calibration FLOPs, peak VRAM, wall-clock time, Top-1 accuracy, and accuracy drop on ResNet-18 W2A2.
+Table II reports Total FLOPs, peak VRAM, wall-clock time, Top-1 accuracy, and accuracy drop on ResNet-18 W2A2.
 
 ### HMA-DCC command
 
@@ -223,7 +222,7 @@ mnasnet
 
 ```bash
 for arch in resnet18 resnet50 mobilenetv2 mnasnet; do
-  CUDA_VISIBLE_DEVICES=0 python sensitivity_analyzer.py \
+  CUDA_VISIBLE_DEVICES=0 python main_hmadcc.py \
     --arch ${arch} \
     --data_path ${DATA_DIR} \
     --n_bits_w 2 \
