@@ -1,6 +1,6 @@
 # Ablation Commands
 
-These commands use the clean public entry `main_hmadcc.py`. They do not copy historical internal ablation scripts.
+These commands use the clean public entry `main_hmadcc.py`. 
 
 Read the following fields from each output JSON: `quantized_top1`, `accuracy_drop`, `calibration_flops`, `peak_memory_mb`, `wall_time_seconds`, `hma_threshold`, `iters_sensitive`, `iters_robust`, `infonce_lambda`, and `protect_head`.
 
