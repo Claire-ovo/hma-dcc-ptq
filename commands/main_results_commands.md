@@ -4,8 +4,6 @@ These commands reproduce the HMA-DCC ImageNet-1K W2A2 setting for the six archit
 
 Read the following fields from each output JSON: `quantized_top1`, `fp32_top1`, `accuracy_drop`, `calibration_flops`, `peak_memory_mb`, `wall_time_seconds`, and `seed`.
 
-Baselines such as AdaRound, BRECQ, QDrop, PD-Quant, and CL-Calib are not run by this entry. Results without plus/minus values are taken from the original papers. Results with plus/minus values are reproduced under the same setting as HMA-DCC.
-
 ## ResNet-18
 
 Paper mapping: main Top-1 table and W2A2 resource table.
