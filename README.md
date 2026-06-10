@@ -66,7 +66,7 @@ Prepare ImageNet in the standard folder layout:
 
 This repository does not include ImageNet or pretrained checkpoints. Pass the dataset root with `--data-dir` and a compatible FP32 checkpoint with `--weight-path`.
 
-The pre-trained FP models in our experiment comes from BRECQ, they can be downloaded in [link](https://github.com/yhhhli/BRECQ). 
+The pre-trained FP models in our experiment comes from BRECQ, they can be downloaded in [link](https://github.com/yhhhli/BRECQ). And modify the path of the pre-trained model in /path/to/weights.
 
 ## Quick Start
 
