@@ -38,6 +38,7 @@ python main_hmadcc.py \
   --input-prob 0.5 \
   --asym \
   --act-quant \
+  --protect-head \
   --workers 4 \
   --device cuda \
   ${EXTRA_ARGS}

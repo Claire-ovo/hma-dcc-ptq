@@ -7,6 +7,7 @@ from .quant_block import BaseQuantBlock, specials_unquantized
 from .adaptive_rounding import AdaRoundQuantizer
 from .set_weight_quantize_params import get_init, get_dc_fp_init
 from .set_act_quantize_params import set_act_quantize_params
+from .device import empty_device_cache, module_device
 
 try:
     from .infonce_loss import InfoNCELoss
@@ -82,6 +83,7 @@ def block_reconstruction_split(model: QuantModel, fp_model: QuantModel, block: B
                                lr: float = 4e-5, input_prob: float = 1.0, keep_gpu: bool = True,
                                lamb_r: float = 0.2, T: float = 7.0, bn_lr: float = 1e-3, lamb_c=0.02,
                                use_infonce=False, infonce_lambda=1.0, infonce_tau=0.1):
+    device = module_device(model)
     cached_inps = get_init(model, block, cali_data, batch_size=batch_size, input_prob=True, keep_gpu=keep_gpu)
     cached_outs, cached_output, cur_syms = get_dc_fp_init(fp_model, fp_block, cali_data, batch_size=batch_size,
                                                           input_prob=True, keep_gpu=keep_gpu, bn_lr=bn_lr, lamb=lamb_c)
@@ -108,7 +110,7 @@ def block_reconstruction_split(model: QuantModel, fp_model: QuantModel, block: B
             w_para += [module.weight_quantizer.alpha]
         if isinstance(module, (QuantModule, BaseQuantBlock)):
             if module.act_quantizer.delta is not None:
-                module.act_quantizer.delta = torch.nn.Parameter(torch.tensor(module.act_quantizer.delta))
+                module.act_quantizer.delta = torch.nn.Parameter(module.act_quantizer.delta.detach().clone())
                 a_para += [module.act_quantizer.delta]
             module.act_quantizer.is_training = True
 
@@ -120,7 +122,6 @@ def block_reconstruction_split(model: QuantModel, fp_model: QuantModel, block: B
 
     loss_func = LossFunction(block, round_loss='relaxation', weight=weight, max_count=iters, rec_loss=opt_mode,
                              b_range=b_range, decay_start=0, warmup=warmup, p=p, lam=lamb_r, T=T)
-    device = 'cuda'
     sz = cached_inps.size(0)
 
     infonce_loss_fn = None
@@ -163,6 +164,7 @@ def block_reconstruction_split(model: QuantModel, fp_model: QuantModel, block: B
         print(f"[Warning] Skipping FLOPs accounting due to: {e}")
 
     for i in range(iters):
+        # Keep the historical CPU RNG stream used by the original protocol.
         idx = torch.randint(0, sz, (batch_size,))
         cur_inp = cached_inps[idx].to(device)
         cur_sym = cur_syms[idx].to(device)
@@ -207,7 +209,7 @@ def block_reconstruction_split(model: QuantModel, fp_model: QuantModel, block: B
         if scheduler: scheduler.step()
         if a_scheduler: a_scheduler.step()
 
-    torch.cuda.empty_cache()
+    empty_device_cache(device)
 
     for module in block.modules():
         if isinstance(module, QuantModule):
