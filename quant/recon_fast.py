@@ -6,6 +6,7 @@ from .quant_block import BaseQuantBlock
 from .adaptive_rounding import AdaRoundQuantizer
 from .set_weight_quantize_params import get_init, get_dc_fp_init
 from .set_act_quantize_params import set_act_quantize_params
+from .device import empty_device_cache, module_device
 
 
 def compute_local_infonce(q_feat, fp_feat, tau=0.1):
@@ -56,6 +57,7 @@ def fast_reconstruction(model, fp_model, module, fp_module, cali_data, batch_siz
                         keep_gpu=True, use_infonce=True, infonce_lambda=1.0, infonce_tau=0.1):
     """Local reconstruction for layers and blocks without an FP tail."""
 
+    device = module_device(model)
     cached_inps = get_init(model, module, cali_data, batch_size=batch_size, input_prob=True, keep_gpu=keep_gpu)
     cached_outs, _, cur_syms = get_dc_fp_init(fp_model, fp_module, cali_data, batch_size=batch_size, input_prob=True,
                                               keep_gpu=keep_gpu)
@@ -73,8 +75,8 @@ def fast_reconstruction(model, fp_model, module, fp_module, cali_data, batch_siz
             mod.weight_quantizer.soft_targets = True
             w_para.append(mod.weight_quantizer.alpha)
         if isinstance(mod, (QuantModule, BaseQuantBlock)):
-            if mod.act_quantizer.delta is not None:
-                mod.act_quantizer.delta = torch.nn.Parameter(torch.tensor(mod.act_quantizer.delta))
+            if isinstance(mod.act_quantizer.delta, torch.Tensor):
+                mod.act_quantizer.delta = torch.nn.Parameter(mod.act_quantizer.delta.detach().clone())
                 a_para.append(mod.act_quantizer.delta)
             mod.act_quantizer.is_training = True
 
@@ -83,7 +85,6 @@ def fast_reconstruction(model, fp_model, module, fp_module, cali_data, batch_siz
     a_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(a_opt, T_max=iters, eta_min=0.) if a_opt else None
 
     loss_func = FastLossFunction(module, weight=weight, max_count=iters, b_range=b_range, warmup=warmup)
-    device = 'cuda'
     sz = cached_inps.size(0)
 
     try:
@@ -102,6 +103,7 @@ def fast_reconstruction(model, fp_model, module, fp_module, cali_data, batch_siz
         print(f"[Warning] Skipping FLOPs accounting due to: {e}")
 
     for i in range(iters):
+        # Keep the historical CPU RNG stream used by the original protocol.
         idx = torch.randint(0, sz, (batch_size,))
         cur_inp = cached_inps[idx].to(device)
         cur_out = cached_outs[idx].to(device)
@@ -143,7 +145,7 @@ def fast_reconstruction(model, fp_model, module, fp_module, cali_data, batch_siz
         if a_opt: a_opt.step()
         if a_scheduler: a_scheduler.step()
 
-    torch.cuda.empty_cache()
+    empty_device_cache(device)
     for mod in module.modules():
         if isinstance(mod, QuantModule):
             mod.weight_quantizer.soft_targets = False

@@ -5,6 +5,7 @@ import torch.nn as nn
 from .quant_layer import QuantModule, Union, lp_loss
 from .quant_model import QuantModel
 from .quant_block import BaseQuantBlock
+from .device import empty_device_cache
 from tqdm import trange
 
 
@@ -28,7 +29,7 @@ def save_dc_fp_data(model: QuantModel, layer: Union[QuantModule, BaseQuantBlock]
     cached_outputs = torch.cat([x[1] for x in cached_batches])
     if input_prob:
         cached_sym = torch.cat([x[2] for x in cached_batches])
-    torch.cuda.empty_cache()
+    empty_device_cache(device)
     if keep_gpu:
         cached_outs = cached_outs.to(device)
         cached_outputs = cached_outputs.to(device)
@@ -64,7 +65,7 @@ def save_inp_oup_data(model: QuantModel, layer: Union[QuantModule, BaseQuantBloc
         cur_inp = get_inp_out(cali_data[i * batch_size:(i + 1) * batch_size])
         cached_batches.append(cur_inp.cpu())
     cached_inps = torch.cat([x for x in cached_batches])
-    torch.cuda.empty_cache()
+    empty_device_cache(device)
     if keep_gpu:
         cached_inps = cached_inps.to(device)
 
@@ -153,9 +154,9 @@ class GetDcFpLayerInpOut:
             if isinstance(m, nn.BatchNorm2d):
             # get the statistics in the BatchNorm layers
                 self.bn_stats.append(
-                    (m.running_mean.detach().clone().flatten().cuda(),
+                    (m.running_mean.detach().clone().flatten().to(self.device),
                     torch.sqrt(m.running_var +
-                                self.eps).detach().clone().flatten().cuda()))
+                                self.eps).detach().clone().flatten().to(self.device)))
     
     def own_loss(self, A, B):
         return (A - B).norm()**2 / B.size(0)

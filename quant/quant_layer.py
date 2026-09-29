@@ -118,7 +118,7 @@ class UniformAffineQuantizer(nn.Module):
         max_val_pos = torch.max(max_val, torch.zeros_like(max_val))
 
         scale = (max_val_pos - min_val_neg) / float(quant_max - quant_min)
-        scale = torch.max(scale, self.eps)
+        scale = torch.max(scale, self.eps.to(scale.device))
         zero_point = quant_min - torch.round(min_val_neg / scale)
         zero_point = torch.clamp(zero_point, quant_min, quant_max)
         return scale, zero_point
@@ -244,13 +244,15 @@ class QuantModule(nn.Module):
             self.fwd_kwargs = dict()
             self.fwd_func = F.linear
         self.weight = org_module.weight
-        self.org_weight = org_module.weight.data.clone()
+        # FP reference tensors must follow the module across CUDA/MPS/CPU, but
+        # remain absent from checkpoints to preserve the historical state dict.
+        self.register_buffer("org_weight", org_module.weight.detach().clone(), persistent=False)
         if org_module.bias is not None:
             self.bias = org_module.bias
-            self.org_bias = org_module.bias.data.clone()
+            self.register_buffer("org_bias", org_module.bias.detach().clone(), persistent=False)
         else:
             self.bias = None
-            self.org_bias = None
+            self.register_buffer("org_bias", None, persistent=False)
         # de-activate the quantized forward default
         self.use_weight_quant = False
         self.use_act_quant = False

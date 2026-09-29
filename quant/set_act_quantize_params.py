@@ -2,11 +2,13 @@ import torch
 from .quant_layer import QuantModule
 from .quant_block import BaseQuantBlock
 from .quant_model import QuantModel
+from .device import empty_device_cache, module_device
 from typing import Union
 
 def set_act_quantize_params(module: Union[QuantModel, QuantModule, BaseQuantBlock],
                             cali_data, batch_size: int = 256):
     module.set_quant_state(True, True)
+    device = module_device(module)
 
     for t in module.modules():
         if isinstance(t, (QuantModule, BaseQuantBlock)):
@@ -16,8 +18,8 @@ def set_act_quantize_params(module: Union[QuantModel, QuantModule, BaseQuantBloc
     batch_size = min(batch_size, cali_data.size(0))
     with torch.no_grad():
         for i in range(int(cali_data.size(0) / batch_size)):
-            module(cali_data[i * batch_size:(i + 1) * batch_size].cuda())
-    torch.cuda.empty_cache()
+            module(cali_data[i * batch_size:(i + 1) * batch_size].to(device))
+    empty_device_cache(device)
 
     for t in module.modules():
         if isinstance(t, (QuantModule, BaseQuantBlock)):

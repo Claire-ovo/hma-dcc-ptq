@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn.functional as F
 from .quant_layer import QuantModule, lp_loss
@@ -6,6 +8,7 @@ from .quant_block import BaseQuantBlock, specials_unquantized
 from .adaptive_rounding import AdaRoundQuantizer
 from .set_weight_quantize_params import get_init, get_dc_fp_init
 from .set_act_quantize_params import set_act_quantize_params
+from .device import empty_device_cache, module_device
 
 # ================= Global InfoNCE module =================
 try:
@@ -88,11 +91,13 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
                          input_prob: float = 1.0, keep_gpu: bool = True,
                          lamb_r: float = 0.2, T: float = 7.0, bn_lr: float = 1e-3, lamb_c=0.02,
                          # Global InfoNCE options.
-                         use_infonce=False, infonce_lambda=1.0, infonce_tau=0.1):
+                         use_infonce=False, infonce_lambda=1.0, infonce_tau=0.1,
+                         profile_callback=None, profile_label=None):
     """
     Reconstruction to optimize the output from each block.
     """
 
+    device = module_device(model)
     '''get input and set scale'''
     cached_inps = get_init(model, block, cali_data, batch_size=batch_size,
                            input_prob=True, keep_gpu=keep_gpu)
@@ -126,8 +131,10 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
             w_para += [module.weight_quantizer.alpha]
         '''activation'''
         if isinstance(module, (QuantModule, BaseQuantBlock)):
-            if module.act_quantizer.delta is not None:
-                module.act_quantizer.delta = torch.nn.Parameter(torch.tensor(module.act_quantizer.delta))
+            # Disabled activation quantizers may retain a scalar delta; only
+            # tensor deltas can be optimized during activation reconstruction.
+            if isinstance(module.act_quantizer.delta, torch.Tensor):
+                module.act_quantizer.delta = torch.nn.Parameter(module.act_quantizer.delta.detach().clone())
                 a_para += [module.act_quantizer.delta]
             '''set up drop'''
             module.act_quantizer.is_training = True
@@ -142,7 +149,6 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
     rec_loss = opt_mode
     loss_func = LossFunction(block, round_loss=loss_mode, weight=weight, max_count=iters, rec_loss=rec_loss,
                              b_range=b_range, decay_start=0, warmup=warmup, p=p, lam=lamb_r, T=T)
-    device = 'cuda'
     sz = cached_inps.size(0)
 
     # Initialize the contrastive loss and precompute FP features.
@@ -150,6 +156,9 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
     cached_v_f = None  # Static global memory bank of precomputed FP features.
     fp_tail = None
     if use_infonce:
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        memory_bank_started = time.perf_counter()
         fp_tail = _build_fp_tail_model(fp_model, fp_block, cali_data, batch_size, device)
         infonce_loss_fn = InfoNCELoss(fp_tail, tau=infonce_tau)
 
@@ -162,8 +171,16 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
                 v_f_batch = infonce_loss_fn._map_features(batch_outs)
                 v_f_list.append(v_f_batch.cpu())
             cached_v_f = torch.cat(v_f_list, dim=0).to(device)
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        if profile_callback is not None:
+            profile_callback('memory_bank', time.perf_counter() - memory_bank_started)
 
-    # Account for the current block and FP tail FLOPs.
+    # Account for the current block FLOPs.  The frozen FP suffix used by
+    # InfoNCE cannot be profiled generically with a forward hook: that hook
+    # still executes the model prefix, so treating its result as suffix FLOPs
+    # would overcount and bias route matching.  Routing experiments therefore
+    # use --disable-infonce and match the reconstruction-module cost only.
     try:
         from thop import profile
         import builtins
@@ -175,24 +192,29 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
             macs_module, _ = profile(temp_block, inputs=(dummy_inp,), verbose=False)
             del temp_block
 
-            # Profile the FP tail when contrastive calibration is enabled.
-            macs_tail = 0
             if use_infonce and fp_tail is not None:
-                dummy_out = block(dummy_inp)
-                temp_tail = copy.deepcopy(fp_tail)
-                macs_tail, _ = profile(temp_tail, inputs=(dummy_out,), verbose=False)
-                del temp_tail
+                # Preserve the historical profiling forward (and its CUDA RNG
+                # consumption) without counting the unscoped FP suffix FLOPs.
+                block(dummy_inp)
 
             # Estimate total calibration FLOPs for this stage.
-            flops_per_sample_per_iter = (macs_module * 3 + macs_tail) * 2
+            flops_per_sample_per_iter = macs_module * 3 * 2
             total_flops_this_stage = flops_per_sample_per_iter * batch_size * iters
 
             if hasattr(builtins, 'GLOBAL_CALIBRATION_FLOPS'):
                 builtins.GLOBAL_CALIBRATION_FLOPS += total_flops_this_stage
+            if profile_callback is not None:
+                profile_callback('flop_components', {
+                    'label': profile_label,
+                    'base_flops_per_iteration': float(macs_module * 3 * 2 * batch_size),
+                    'tail_flops_per_iteration': None,
+                    'tail_flops_scope': 'not profiled; routing studies disable InfoNCE',
+                })
     except Exception as e:
         print(f"[Warning] Skipping FLOPs accounting due to: {e}")
 
     for i in range(iters):
+        # Keep the historical CPU RNG stream used by the original protocol.
         idx = torch.randint(0, sz, (batch_size,))
         cur_inp = cached_inps[idx].to(device)
         cur_sym = cur_syms[idx].to(device)
@@ -233,7 +255,9 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
             if loss_func.count % 500 == 0 or loss_func.count == 1:
                 print(f"      ---> [Global InfoNCE] Scaled loss: {infonce_loss_val.item():.4f} | Base loss: {(err - infonce_loss_val).item():.4f}")
 
-        err.backward(retain_graph=True)
+        # Each iteration builds a fresh objective graph; retaining the graph
+        # across iterations causes unbounded CUDA memory growth on deep models.
+        err.backward()
         if w_opt:
             w_opt.step()
         if a_opt:
@@ -242,7 +266,7 @@ def block_reconstruction(model: QuantModel, fp_model: QuantModel, block: BaseQua
             scheduler.step()
         if a_scheduler:
             a_scheduler.step()
-    torch.cuda.empty_cache()
+    empty_device_cache(device)
 
     for module in block.modules():
         if isinstance(module, QuantModule):

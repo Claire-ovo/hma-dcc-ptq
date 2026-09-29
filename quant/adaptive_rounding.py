@@ -34,17 +34,22 @@ class AdaRoundQuantizer(nn.Module):
         self.init_alpha(x=weight_tensor.clone())
 
     def forward(self, x):
+        # These legacy quantizer attributes were plain tensors, not buffers;
+        # align them at use time so checkpoints saved before buffer registration
+        # remain executable on CUDA.
+        delta = self.delta.to(x.device) if isinstance(self.delta, torch.Tensor) else self.delta
+        zero_point = self.zero_point.to(x.device) if isinstance(self.zero_point, torch.Tensor) else self.zero_point
         if self.round_mode == 'nearest':
-            x_int = torch.round(x / self.delta)
+            x_int = torch.round(x / delta)
         elif self.round_mode == 'nearest_ste':
-            x_int = round_ste(x / self.delta)
+            x_int = round_ste(x / delta)
         elif self.round_mode == 'stochastic':
-            x_floor = torch.floor(x / self.delta)
-            rest = (x / self.delta) - x_floor  # rest of rounding
+            x_floor = torch.floor(x / delta)
+            rest = (x / delta) - x_floor  # rest of rounding
             x_int = x_floor + torch.bernoulli(rest)
             print('Draw stochastic sample')
         elif self.round_mode == 'learned_hard_sigmoid':
-            x_floor = torch.floor(x / self.delta)
+            x_floor = torch.floor(x / delta)
             if self.soft_targets:
                 x_int = x_floor + self.get_soft_targets()
             else:
@@ -52,8 +57,8 @@ class AdaRoundQuantizer(nn.Module):
         else:
             raise ValueError('Wrong rounding mode')
 
-        x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
-        x_float_q = (x_quant - self.zero_point) * self.delta
+        x_quant = torch.clamp(x_int + zero_point, 0, self.n_levels - 1)
+        x_float_q = (x_quant - zero_point) * delta
 
         return x_float_q
 

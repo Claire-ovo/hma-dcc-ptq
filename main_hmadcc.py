@@ -23,6 +23,7 @@ from quant.layer_recon import layer_reconstruction
 from quant.quant_block import BaseQuantBlock
 from quant.quant_layer import QuantModule
 from quant.quant_model import QuantModel
+from quant.device import empty_device_cache, peak_memory_mb, reset_peak_memory_stats, resolve_device
 from quant.set_weight_quantize_params import get_init, set_weight_quantize_params
 
 
@@ -42,8 +43,9 @@ def seed_all(seed: int = 1029) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
@@ -78,6 +80,11 @@ def accuracy(output, target, topk=(1,)):
     return res
 
 
+def synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def validate_model(val_loader, model, device, print_freq: int = 100) -> float:
     model.eval()
     top1 = AverageMeter()
@@ -94,14 +101,18 @@ def validate_model(val_loader, model, device, print_freq: int = 100) -> float:
     return float(top1.avg)
 
 
-def get_train_samples(train_loader, num_samples: int):
+def get_train_samples(train_loader, num_samples: int, ordered_manifest: bool = False):
     train_data, targets = [], []
     for batch in train_loader:
         train_data.append(batch[0])
         targets.append(batch[1])
         if len(train_data) * batch[0].size(0) >= num_samples:
             break
-    return torch.cat(train_data, dim=0)[:num_samples], torch.cat(targets, dim=0)[:num_samples]
+    return (
+        torch.cat(train_data, dim=0)[:num_samples],
+        torch.cat(targets, dim=0)[:num_samples],
+        [path for path, _ in train_loader.dataset.samples[:num_samples]] if ordered_manifest else None,
+    )
 
 
 def build_model(arch: str) -> nn.Module:
@@ -133,7 +144,7 @@ def load_pretrained_weights(model: nn.Module, weight_path: str) -> None:
     if not os.path.isfile(weight_path):
         raise FileNotFoundError(f"Weight file not found: {weight_path}")
 
-    checkpoint = torch.load(weight_path, map_location="cpu")
+    checkpoint = torch.load(weight_path, map_location="cpu", weights_only=True)
     state_dict = strip_module_prefix(extract_state_dict(checkpoint))
     if not isinstance(state_dict, dict):
         raise TypeError("The checkpoint must be a state dict or contain a state_dict/model entry.")
@@ -204,8 +215,11 @@ def extract_hybrid_metrics(
 ):
     device = next(fp_model.parameters()).device
     metric_dict = {}
+    stage_metrics = {}
 
     print("\n[Phase 1] Estimating HMA routing metrics")
+    reset_peak_memory_stats(device)
+    hessian_started = time.perf_counter()
 
     clean_fp_model = clean_fp_model.to(device).eval()
     for param in clean_fp_model.parameters():
@@ -249,7 +263,16 @@ def extract_hybrid_metrics(
     for name in trace_dict:
         trace_dict[name] = abs(trace_dict[name] / max_iter)
 
-    torch.cuda.empty_cache()
+    # Release the second-order autograd graph before measuring perturbation memory.
+    del logits, loss, grads, used_grads, vectors, grad_vector_product, hvp
+    synchronize_device(device)
+    stage_metrics["hessian"] = {
+        "wall_time_seconds": time.perf_counter() - hessian_started,
+        "peak_memory_mb": peak_memory_mb(device),
+        "flops": None,
+        "flops_scope": "not estimated by the current profiler",
+    }
+    empty_device_cache(device)
 
     def evaluate_topology(cur_model, cur_fp_model, prefix=""):
         for (name, module), (_, fp_module) in zip(cur_model.named_children(), cur_fp_model.named_children()):
@@ -288,8 +311,17 @@ def extract_hybrid_metrics(
             else:
                 evaluate_topology(module, fp_module, full_name)
 
+    reset_peak_memory_stats(device)
+    perturbation_started = time.perf_counter()
     with torch.no_grad():
         evaluate_topology(q_model, fp_model)
+    synchronize_device(device)
+    stage_metrics["perturbation"] = {
+        "wall_time_seconds": time.perf_counter() - perturbation_started,
+        "peak_memory_mb": peak_memory_mb(device),
+        "flops": None,
+        "flops_scope": "not estimated by the current profiler",
+    }
 
     h_vals = [metrics["hessian"] for metrics in metric_dict.values()]
     p_vals = [metrics["perturb"] for metrics in metric_dict.values()]
@@ -314,7 +346,61 @@ def extract_hybrid_metrics(
         print(f"{name:<22} | {h_norm:<10.4f} | {p_norm:<12.4f} | {hybrid_score:<8.4f} | {route}")
 
     print(f"{'-' * 86}")
+    return routing_table, stage_metrics
+
+
+def selected_route_from_payload(payload, key: str):
+    routes = payload.get("route_selections", payload)
+    if key not in routes:
+        raise KeyError(f"Route {key!r} not found. Available routes: {', '.join(sorted(routes))}")
+    route = routes[key]
+    selected = route.get("selected") if isinstance(route, dict) else route
+    if not isinstance(selected, list) or not all(isinstance(name, str) for name in selected):
+        raise TypeError(f"Route {key!r} must be a list or contain a string-list 'selected' field.")
+    if len(selected) != len(set(selected)):
+        raise ValueError(f"Route {key!r} contains duplicate block names.")
+    return set(selected)
+
+
+def load_routing_table(q_model, json_path: str, key: str):
+    with open(json_path, "r", encoding="utf-8") as stream:
+        selected = selected_route_from_payload(json.load(stream), key)
+
+    routing_table = {}
+
+    def visit(module, prefix=""):
+        for name, child in module.named_children():
+            full_name = f"{prefix}.{name}" if prefix else name
+            if isinstance(child, (BaseQuantBlock, QuantModule)):
+                routing_table[full_name] = full_name in selected
+            else:
+                visit(child, full_name)
+
+    visit(q_model)
+    unknown = selected.difference(routing_table)
+    if unknown:
+        raise ValueError(f"Route {key!r} contains unknown blocks: {', '.join(sorted(unknown))}")
+    print(f"Loaded route {key!r}: {len(selected)}/{len(routing_table)} blocks use the sensitive budget.")
     return routing_table
+
+
+def apply_routing_policy(routing_table, policy: str, seed: int):
+    if policy == "hma":
+        return routing_table
+    names = sorted(routing_table)
+    k = sum(routing_table.values())
+    if policy == "inverted":
+        selected = {name for name, sensitive in routing_table.items() if not sensitive}
+        selected = set(sorted(selected)[:k])
+    elif policy == "uniform":
+        indices = [round(i * (len(names) - 1) / max(1, k - 1)) for i in range(k)]
+        selected = {names[i] for i in indices}
+    elif policy == "random":
+        generator = random.Random(seed)
+        selected = set(generator.sample(names, k))
+    else:
+        raise ValueError(f"Unknown routing policy: {policy}")
+    return {name: name in selected for name in names}
 
 
 def reconstruct_model(
@@ -323,6 +409,7 @@ def reconstruct_model(
     routing_table,
     cali_data,
     args,
+    profile_callback=None,
 ):
     def recon_model_topology(cur_model: nn.Module, cur_fp_model: nn.Module, prefix=""):
         for (name, module), (_, fp_module) in zip(cur_model.named_children(), cur_fp_model.named_children()):
@@ -347,6 +434,8 @@ def reconstruct_model(
                 use_infonce=False,
                 infonce_lambda=0.0,
                 infonce_tau=args.infonce_tau,
+                profile_callback=profile_callback,
+                profile_label=full_name,
             )
 
             is_sensitive = routing_table.get(full_name, True)
@@ -356,8 +445,8 @@ def reconstruct_model(
                 cur_kwargs["infonce_lambda"] = 0.0
             else:
                 cur_kwargs["iters"] = args.iters_robust
-                cur_kwargs["use_infonce"] = True
-                cur_kwargs["infonce_lambda"] = args.infonce_lambda
+                cur_kwargs["use_infonce"] = not args.disable_infonce
+                cur_kwargs["infonce_lambda"] = args.infonce_lambda if cur_kwargs["use_infonce"] else 0.0
 
             if is_fc_head(full_name):
                 cur_kwargs["iters"] = args.iters_robust
@@ -393,12 +482,35 @@ def save_summary(args, summary) -> None:
     print(f"Saved summary to: {output_path}")
 
 
+def save_quantized_checkpoint(qnn: nn.Module, args, path: str) -> None:
+    """Save the calibrated quantized state for an independent forward benchmark."""
+    state_dict = {key: value.detach().cpu() for key, value in qnn.state_dict().items()}
+    checkpoint_model = copy.deepcopy(qnn).cpu()
+    payload = {
+        "format": "hma_dcc_quantized_v1",
+        "arch": args.arch,
+        "weight_bits": args.n_bits_w,
+        "activation_bits": args.n_bits_a,
+        "seed": args.seed,
+        "model": checkpoint_model,
+        "state_dict": state_dict,
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    torch.save(payload, path)
+    print(f"Saved quantized checkpoint to: {path}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="HMA-DCC ImageNet post-training quantization")
     parser.add_argument("--arch", default="resnet18", choices=sorted(MODEL_REGISTRY.keys()))
-    parser.add_argument("--data-dir", required=True, help="Path to the ImageNet directory containing train/ and val/.")
+    parser.add_argument("--data-dir", required=True, help="ImageNet root used when --train-dir/--val-dir are omitted.")
+    parser.add_argument("--train-dir", help="Optional explicit ImageNet training directory.")
+    parser.add_argument("--val-dir", help="Optional explicit ImageNet validation directory.")
+    parser.add_argument("--calibration-manifest", help="Optional ordered list of calibration images relative to --train-dir.")
+    parser.add_argument("--validation-manifest", help="Optional ordered list of validation images relative to --val-dir.")
     parser.add_argument("--weight-path", required=True, help="Path to the pretrained FP32 checkpoint.")
     parser.add_argument("--output-dir", default="outputs", help="Directory for generated summaries.")
+    parser.add_argument("--save-quantized-checkpoint", help="Optional path for the calibrated quantized state_dict.")
     parser.add_argument("--n-bits-w", default=2, type=int, help="Weight quantization bit-width.")
     parser.add_argument("--n-bits-a", default=2, type=int, help="Activation quantization bit-width.")
     parser.add_argument("--batch-size", default=64, type=int)
@@ -409,6 +521,10 @@ def parse_args():
     parser.add_argument("--iters-robust", default=5000, type=int)
     parser.add_argument("--infonce-lambda", default=0.1, type=float)
     parser.add_argument("--infonce-tau", default=0.1, type=float)
+    parser.add_argument("--disable-infonce", action="store_true", help="Disable InfoNCE while keeping routing and budgets fixed.")
+    parser.add_argument("--routing-json", help="Reuse archived route selections instead of recomputing HMA metrics.")
+    parser.add_argument("--routing-key", help="Selection key under route_selections in --routing-json.")
+    parser.add_argument("--routing-policy", choices=("hma", "uniform", "random", "inverted"), default="hma")
     parser.add_argument("--hessian-samples", default=20, type=int)
     parser.add_argument("--recon-weight", default=0.01, type=float)
     parser.add_argument("--recon-lr", default=4e-5, type=float)
@@ -418,7 +534,11 @@ def parse_args():
     parser.add_argument("--opt-mode", default="mse", type=str)
     parser.add_argument("--input-prob", default=0.5, type=float)
     parser.add_argument("--workers", default=4, type=int)
-    parser.add_argument("--device", default="cuda", help="CUDA device used for calibration, e.g. cuda or cuda:0.")
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="Calibration device (paper protocol default: cuda); auto, mps, and cpu are explicit smoke-test modes.",
+    )
     quant_group = parser.add_mutually_exclusive_group()
     quant_group.add_argument("--asym", dest="asym", action="store_true", default=True)
     quant_group.add_argument("--symmetric", dest="asym", action="store_false")
@@ -437,14 +557,12 @@ def main():
     args = parse_args()
     if args.hessian_samples <= 0:
         raise ValueError("--hessian-samples must be positive.")
+    if bool(args.routing_json) != bool(args.routing_key):
+        raise ValueError("--routing-json and --routing-key must be provided together.")
     seed_all(args.seed)
 
-    device = torch.device(args.device)
-    if device.type != "cuda":
-        raise ValueError("HMA-DCC calibration currently expects a CUDA device because reconstruction uses CUDA tensors.")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available.")
-    if device.index is not None:
+    device = resolve_device(args.device)
+    if device.type == "cuda" and device.index is not None:
         torch.cuda.set_device(device.index)
 
     print("HMA-DCC ImageNet PTQ")
@@ -454,12 +572,24 @@ def main():
     print(f"HMA hard-routing threshold: {args.hma_threshold}")
     print(f"Hessian estimation samples: {args.hessian_samples}")
     print(f"Head protection: {'enabled' if args.protect_head else 'disabled'}")
+    print(f"Device: {device}")
+    if device.type != "cuda":
+        print("WARNING: Non-CUDA runs are for local functional validation; resource metrics are not paper-comparable.")
 
     train_loader, test_loader = build_imagenet_data(
         batch_size=args.batch_size,
         workers=args.workers,
         data_path=args.data_dir,
+        train_dir=args.train_dir,
+        val_dir=args.val_dir,
+        calibration_manifest=args.calibration_manifest,
+        validation_manifest=args.validation_manifest,
     )
+    if args.calibration_manifest and len(train_loader.dataset) != args.num_calibration_samples:
+        raise ValueError(
+            "--calibration-manifest must contain exactly --num-calibration-samples images "
+            f"({len(train_loader.dataset)} != {args.num_calibration_samples})."
+        )
 
     cnn = build_model(args.arch)
     load_pretrained_weights(cnn, args.weight_path)
@@ -487,49 +617,170 @@ def main():
     qnn.set_first_last_layer_to_8bit()
     qnn.disable_network_output_quantization()
 
-    cali_data, cali_target = get_train_samples(train_loader, num_samples=args.num_calibration_samples)
+    cali_data, cali_target, calibration_paths = get_train_samples(
+        train_loader,
+        num_samples=args.num_calibration_samples,
+        ordered_manifest=bool(args.calibration_manifest),
+    )
+    calibration_count = int(cali_data.size(0))
+    calibration_sampling = "ordered_manifest" if args.calibration_manifest else "loader_native_seeded"
     set_weight_quantize_params(qnn)
 
-    routing_table = extract_hybrid_metrics(
-        qnn,
-        fp_model,
-        clean_fp_model,
-        cali_data,
-        cali_target,
-        batch_size=args.batch_size,
-        threshold=args.hma_threshold,
-        protect_head=args.protect_head,
-        hessian_samples=args.hessian_samples,
-        act_quant=args.act_quant,
-    )
+    calibration_started = time.perf_counter()
+    if args.routing_json:
+        routing_table = load_routing_table(qnn, args.routing_json, args.routing_key)
+        stage_metrics = {
+            "routing": {
+                "source": "archived_route",
+                "hessian": None,
+                "perturbation": None,
+            }
+        }
+    else:
+        routing_table, routing_stage_metrics = extract_hybrid_metrics(
+            qnn,
+            fp_model,
+            clean_fp_model,
+            cali_data,
+            cali_target,
+            batch_size=args.batch_size,
+            threshold=args.hma_threshold,
+            protect_head=args.protect_head,
+            hessian_samples=args.hessian_samples,
+            act_quant=args.act_quant,
+        )
+        stage_metrics = {"routing": routing_stage_metrics}
+    routing_table = apply_routing_policy(routing_table, args.routing_policy, args.seed)
 
     builtins.GLOBAL_CALIBRATION_FLOPS = 0.0
-    torch.cuda.reset_peak_memory_stats(device)
-    start_time = time.time()
+    reset_peak_memory_stats(device)
+    reconstruction_started = time.perf_counter()
+    memory_bank_metrics = {"event_count": 0, "wall_time_seconds": 0.0}
+    block_cost_components = {}
+
+    def record_profile_event(name: str, payload) -> None:
+        if name == "memory_bank":
+            memory_bank_metrics["event_count"] += 1
+            memory_bank_metrics["wall_time_seconds"] += payload
+        elif name == "flop_components":
+            label = payload.get("label")
+            if not label:
+                raise ValueError("FLOPs profile callback did not provide a block label.")
+            block_cost_components[label] = payload
+        else:
+            raise ValueError(f"Unknown calibration profile event: {name}")
 
     print("\n[Step 1] Running HMA-DCC block-wise calibration")
-    reconstruct_model(qnn, fp_model, routing_table, cali_data, args)
+    reconstruct_model(qnn, fp_model, routing_table, cali_data, args, record_profile_event)
 
-    wall_clock_time = time.time() - start_time
-    peak_memory = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+    synchronize_device(device)
+    wall_clock_time = time.perf_counter() - reconstruction_started
+    peak_memory = peak_memory_mb(device)
     total_flops = getattr(builtins, "GLOBAL_CALIBRATION_FLOPS", 0.0)
+    route_cost_profile = {}
+    for label, components in block_cost_components.items():
+        base_per_iteration = components["base_flops_per_iteration"]
+        route_cost_profile[label] = {
+            "high_budget_flops": base_per_iteration * args.iters_sensitive,
+            "low_budget_flops": base_per_iteration * args.iters_robust,
+            "base_flops_per_iteration": base_per_iteration,
+            "tail_flops_per_iteration": components["tail_flops_per_iteration"],
+            "cost_scope": "reconstruction-module FLOPs only; valid for route matching only when InfoNCE is disabled",
+        }
+    stage_metrics["memory_bank"] = {
+        **memory_bank_metrics,
+        "peak_memory_mb": None,
+        "peak_memory_scope": "interleaved with reconstruction; report the reconstruction-stage peak instead",
+        "flops": None,
+        "flops_scope": "not separately estimated by the current profiler",
+    }
+    stage_metrics["reconstruction"] = {
+        "wall_time_seconds": wall_clock_time,
+        "peak_memory_mb": peak_memory,
+        "flops": total_flops,
+        "flops_scope": "estimated phase-2 reconstruction objective only",
+    }
+    routing_peaks = [
+        value.get("peak_memory_mb")
+        for value in stage_metrics["routing"].values()
+        if isinstance(value, dict) and value.get("peak_memory_mb") is not None
+    ]
+    stage_metrics["end_to_end_calibration"] = {
+        "wall_time_seconds": time.perf_counter() - calibration_started,
+        "peak_memory_mb": max([peak_memory, *routing_peaks]) if peak_memory is not None else None,
+        "flops": None,
+        "flops_scope": "not available until all calibration stages use a common FLOPs profiler",
+    }
 
     print("\n[Step 2] Evaluating the quantized model")
     qnn.set_quant_state(weight_quant=True, act_quant=args.act_quant)
+    if args.save_quantized_checkpoint:
+        save_quantized_checkpoint(qnn, args, args.save_quantized_checkpoint)
     final_acc = validate_model(test_loader, qnn, device)
 
     acc_drop = fp32_acc - final_acc
+    paper_comparable = (
+        args.num_calibration_samples == 1024
+        and calibration_count == 1024
+        and len(test_loader.dataset) == 50000
+        and args.seed == 1005
+        and args.batch_size == 64
+        and args.n_bits_w == 2
+        and args.n_bits_a == 2
+        and args.asym
+        and args.act_quant
+        and args.infonce_lambda == 0.1
+        and args.infonce_tau == 0.1
+        and args.hma_threshold == 0.4
+        and args.iters_sensitive == 20000
+        and args.iters_robust == 5000
+        and args.hessian_samples == 20
+        and args.recon_weight == 0.01
+        and args.recon_lr == 4e-5
+        and args.b_start == 20
+        and args.b_end == 2
+        and args.warmup == 0.2
+        and args.opt_mode == "mse"
+        and args.input_prob == 0.5
+        and args.protect_head
+        and device.type == "cuda"
+        and args.calibration_manifest is None
+        and calibration_paths is None
+        and args.validation_manifest is None
+        and args.routing_json is None
+        and args.routing_key is None
+        and args.routing_policy == "hma"
+        and not args.disable_infonce
+    )
     summary = {
+        "protocol": "original_paper_v1" if paper_comparable else "custom_control",
+        "paper_comparable": paper_comparable,
         "arch": args.arch,
         "weight_bits": args.n_bits_w,
         "activation_bits": args.n_bits_a,
         "seed": args.seed,
         "num_calibration_samples": args.num_calibration_samples,
+        "batch_size": args.batch_size,
+        "device_type": device.type,
+        "data_dir": os.path.abspath(args.data_dir),
+        "train_dir": os.path.abspath(args.train_dir) if args.train_dir else None,
+        "val_dir": os.path.abspath(args.val_dir) if args.val_dir else None,
+        "calibration_manifest": os.path.abspath(args.calibration_manifest) if args.calibration_manifest else None,
+        "validation_manifest": os.path.abspath(args.validation_manifest) if args.validation_manifest else None,
+        "calibration_sampling": calibration_sampling,
+        "calibration_paths": calibration_paths,
+        "validation_paths": [path for path, _ in test_loader.dataset.samples],
+        "calibration_count": calibration_count,
+        "validation_count": len(test_loader.dataset),
         "hma_threshold": args.hma_threshold,
         "iters_sensitive": args.iters_sensitive,
         "iters_robust": args.iters_robust,
         "infonce_lambda": args.infonce_lambda,
         "infonce_tau": args.infonce_tau,
+        "infonce_enabled": not args.disable_infonce,
+        "routing_json": args.routing_json,
+        "routing_key": args.routing_key,
+        "routing_policy": args.routing_policy,
         "hessian_samples": args.hessian_samples,
         "recon_weight": args.recon_weight,
         "recon_lr": args.recon_lr,
@@ -544,8 +795,11 @@ def main():
         "quantized_top1": final_acc,
         "accuracy_drop": acc_drop,
         "calibration_flops": total_flops,
+        "calibration_flops_scope": "estimated phase-2 reconstruction objective only",
+        "route_cost_profile": route_cost_profile,
         "peak_memory_mb": peak_memory,
         "wall_time_seconds": wall_clock_time,
+        "stage_metrics": stage_metrics,
     }
 
     print("\n" + "=" * 72)
@@ -555,7 +809,8 @@ def main():
     print(f"Quantized Top-1     : {final_acc:.2f}%")
     print(f"Accuracy drop       : {acc_drop:.2f}%")
     print(f"Calibration FLOPs   : {total_flops / 1e12:.4f} TFLOPs")
-    print(f"Peak memory         : {peak_memory:.2f} MB")
+    peak_memory_text = f"{peak_memory:.2f} MB" if peak_memory is not None else "N/A (CUDA-only metric)"
+    print(f"Peak memory         : {peak_memory_text}")
     print(f"Wall time           : {wall_clock_time / 3600:.2f} h ({wall_clock_time:.2f} s)")
     print("=" * 72 + "\n")
 
